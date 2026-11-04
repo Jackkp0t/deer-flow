@@ -3397,7 +3397,13 @@ def _graph_input_messages(graph_input: Any | None) -> list[Any]:
 def _title_generation_state(channel_values: dict[str, Any], graph_input: Any | None) -> dict[str, Any]:
     state = dict(channel_values)
     messages = state.get("messages")
-    if not messages:
+    # A delta checkpoint stores the ``messages`` channel as a ``_DeltaSnapshot``
+    # sentinel on snapshot heads instead of a list (see ``CheckpointStateAccessor``).
+    # The sentinel is truthy but iterates its single field, so handing it on both
+    # hides the run-input fallback below and leaves the title middleware with no
+    # message to derive a title from. Only an actual list counts as read state.
+    if not isinstance(messages, list) or not messages:
+        state.pop("messages", None)
         fallback_messages = _graph_input_messages(graph_input)
         if fallback_messages:
             state["messages"] = fallback_messages

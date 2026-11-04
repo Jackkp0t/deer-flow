@@ -308,8 +308,9 @@ async def test_non_delta_writers_preserve_delta_messages_and_markers(saver_env: 
         durations={"run-1": 7},
     )
     assert durations_written
-    # Delta checkpoints carry no messages in channel_values, so the title
-    # helper has nothing to derive from and must stay inert (no write).
+    # This head carries no ``messages`` entry at all (the metadata writer cloned
+    # the parent's channel_versions), so with no run input the title helper has
+    # nothing to derive from and must stay inert (no write).
     title = await _ensure_interrupted_title(checkpointer=saver_env.saver, thread_id=thread_id, app_config=None)
     assert title is None
 
@@ -328,6 +329,39 @@ async def test_non_delta_writers_preserve_delta_messages_and_markers(saver_env: 
     assert checkpoint_tuple_uses_delta(latest_tuple)
     assert latest_tuple.metadata.get(CHECKPOINT_MODE_METADATA_KEY) == "delta"
     assert latest_tuple.metadata.get("run_durations", {}).get("run-1") == 7
+
+
+@pytest.mark.anyio
+async def test_interrupted_title_survives_a_delta_snapshot_head(saver_env: _SaverEnv) -> None:
+    """A snapshot head stores ``messages`` as a ``_DeltaSnapshot``, not a list.
+
+    The interrupted-title helper reads raw ``channel_values`` (it copies the
+    head's metadata), so a sentinel is truthy but iterates its single field
+    instead of messages: the ``graph_input`` fallback below it never runs and
+    ``TitleMiddleware`` gets nothing to derive a title from. The same thread,
+    read through ``CheckpointStateAccessor``, still has both messages.
+    """
+    thread_id = _thread_id()
+    config = _config(thread_id)
+    graph = _build_graph(DeltaState, saver_env.saver)
+    accessor = CheckpointStateAccessor.bind(graph, saver_env.saver, mode="delta")
+    first_turn = {"messages": [HumanMessage(id="h1", content="hello snapshot head")]}
+
+    await graph.ainvoke(first_turn, config)
+    await graph.ainvoke({"messages": [AIMessage(id="a1", content="reply")]}, config)
+    snapshot = await accessor.aget(config)
+    assert [message.content for message in snapshot.values["messages"]] == ["hello snapshot head", "reply"]
+
+    title = await _ensure_interrupted_title(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        app_config=None,
+        graph_input=first_turn,
+    )
+
+    assert title == "hello snapshot head"
+    persisted = await saver_env.saver.aget_tuple(config)
+    assert persisted.checkpoint["channel_values"].get("title") == "hello snapshot head"
 
 
 # ---------------------------------------------------------------------------
